@@ -1,0 +1,1 @@
+web: gunicorn tiktok_backend.wsgi --log-file -
