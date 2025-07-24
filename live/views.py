@@ -38,7 +38,7 @@ def ensure_listener(username: str):
 
 def live_events(request):
     # Read TikTok username from query parameter or default
-    username = request.GET.get("username", "YOUR_TIKTOK_USERNAME")
+    username = request.GET.get("username", "parsl3y")
     # Start background listener once
     ensure_listener(username)
 
