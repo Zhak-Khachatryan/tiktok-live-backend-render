@@ -27,7 +27,7 @@ def ensure_thread(username):
 
 def live_events(request):
     # Get TikTok username from query, or default
-    username = request.GET.get('username', 'YOUR_TIKTOK_USERNAME')
+    username = request.GET.get('username', 'parsl3y')
     # Ensure background listener is running
     ensure_thread(username)
 
