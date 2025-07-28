@@ -72,7 +72,7 @@ def live_events(request):
     SSE endpoint streaming GiftEvent data as JSON.
     Use `?username=<tiktok_user>` to specify stream.
     """
-    username = request.GET.get('username', 'afrogenerals')
+    username = request.GET.get('username', 'davidcrossland4')
     ensure_listener(username)
 
     def event_stream():
