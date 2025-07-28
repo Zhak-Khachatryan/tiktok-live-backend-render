@@ -25,7 +25,7 @@ SECRET_KEY = 'django-insecure-nx&^-^3glj7u0n_i9$w&ovlue7kqk$$kacu%!i9%eu230^!!c0
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['tiktok-live-backend-render.onrender.com']
+ALLOWED_HOSTS = ['tiktok-live-backend-render.onrender.com', '127.0.0.1']
 
 
 # Application definition
@@ -90,7 +90,7 @@ DATABASES = {
 
 AUTH_PASSWORD_VALIDATORS = [
     {
-        'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
+        'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',  # noqa: E501
     },
     {
         'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',

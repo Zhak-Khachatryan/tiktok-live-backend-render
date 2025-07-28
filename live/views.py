@@ -1,54 +1,101 @@
+import json
 import queue
 import threading
-from django.http import StreamingHttpResponse
+import time
+
+from django.http import JsonResponse, StreamingHttpResponse
 from TikTokLive import TikTokLiveClient
 from TikTokLive.events import GiftEvent
 
 # Thread-safe queue for gift events
-EVENT_QUEUE = queue.Queue()
+event_queue = queue.Queue()
+listener_thread = None
+recent_events = []  # in-memory store of recent gifts
+MAX_EVENTS = 20
 
-
-def start_tiktok_listener(username: str):
+def start_listener(username: str):
     """
-    Connect to TikTok Live and enqueue every GiftEvent received.
+    Background listener: connects to TikTok Live and enqueues GiftEvent data.
+    Retries on failure to maintain connection.
     """
-    client = TikTokLiveClient(unique_id=username)
+    while True:
+        client = TikTokLiveClient(unique_id=username)
 
-    @client.on(GiftEvent)
-    async def on_gift(event):
-        # Enqueue event data tuple
-        EVENT_QUEUE.put((event.user.nickname, event.gift.name, event.gift.repeat_count))
+        @client.on(GiftEvent)
+        async def on_gift(event):
+            try:
+                count = event.gift.repeat_count
+            except AttributeError:
+                # Fallback if attribute differs or single gift
+                count = getattr(event.gift, 'repeatCount', 1)  # noqa: F841
+            data = {
+                'username': event.user.nick_name,
+                'profile_picture': event.user.profile_picture.url_list[0],
+                'gift': event.gift.name,
+                'gift_image': event.gift.image.url_list[0],
+                'gift_diamonds': event.gift.diamond_count,
+                'gift_count': count,
+                'ts': time.time(),
+            }
+            # log to console
+            print('Received gift:', data)
+            # enqueue for SSE
+            event_queue.put(data)
+            # store in recent events
+            recent_events.insert(0, data)
+            if len(recent_events) > MAX_EVENTS:
+                recent_events.pop()
 
-    # Start listening (blocks until disconnected)
-    client.run()
-
-
-# Ensure only one listener thread is started
-_listener_thread = None
-
+        try:
+            client.run()
+        except Exception as e:
+            print(f"Listener error: {e}")
+            time.sleep(5)
+            continue
+        break
 
 def ensure_listener(username: str):
-    global _listener_thread
-    if _listener_thread is None:
-        _listener_thread = threading.Thread(
-            target=start_tiktok_listener, args=(username,), daemon=True
+    """
+    Starts the background listener thread if not already running.
+    """
+    global listener_thread
+    if listener_thread is None or not listener_thread.is_alive():
+        listener_thread = threading.Thread(
+            target=start_listener,
+            args=(username,),
+            daemon=True
         )
-        _listener_thread.start()
-
+        listener_thread.start()
 
 def live_events(request):
-    # Read TikTok username from query parameter or default
-    username = request.GET.get("username", "parsl3y")
-    # Start background listener once
+    """
+    SSE endpoint streaming GiftEvent data as JSON.
+    Use `?username=<tiktok_user>` to specify stream.
+    """
+    username = request.GET.get('username', 'afrogenerals')
     ensure_listener(username)
 
     def event_stream():
-        # Continuously yield SSE-formatted gift events
         while True:
-            user, gift_name, count = EVENT_QUEUE.get()  # blocks
-            data = f"GIFT:{user}:{gift_name}:{count}"
-            # SSE format requires 'data:' prefix and double newline separator
-            yield f"data: {data}"
+            try:
+                event = event_queue.get(timeout=15)
+                payload = json.dumps(event)
+                # SSE format: data:<payload>
 
-    # Return a streaming response with SSE
-    return StreamingHttpResponse(event_stream(), content_type="text/event-stream")
+
+                yield f"data: {payload}"
+            except queue.Empty:
+                # heartbeat to keep SSE alive
+                yield ": heartbeat"
+                time.sleep(1)
+
+    return StreamingHttpResponse(
+        event_stream(),
+        content_type='text/event-stream'
+    )
+
+def recent_gifts(request):
+    """
+    Returns the most recent gifts as JSON.
+    """
+    return JsonResponse(recent_events, safe=False)
