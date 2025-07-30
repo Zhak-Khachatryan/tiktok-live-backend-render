@@ -23,28 +23,67 @@ def start_listener(username: str):
 
         @client.on(GiftEvent)
         async def on_gift(event):
+            # --- 1. USER AVATAR ---
+            # From your dump, the user’s thumbnail lives in `avatar_thumb.m_urls`
             try:
-                count = event.gift.repeat_count
-            except AttributeError:
-                # Fallback if attribute differs or single gift
-                count = getattr(event.gift, 'repeatCount', 1)  # noqa: F841
+                avatar_url = event.user.avatar_thumb.m_urls[0]
+            except Exception:
+                avatar_url = None
+
+            # --- 2. GIFT IMAGE ---
+            # The gift object has both `.image` and `.icon`, both ImageModel instances.
+            # You can pick either; they both point to the same URLs in your example.
+            try:
+                gift_image_url = event.gift.image.m_urls[0]
+            except Exception:
+                # fallback to .icon if needed
+                try:
+                    gift_image_url = event.gift.icon.m_urls[0]
+                except Exception:
+                    gift_image_url = None
+
+            # --- 3. OTHER GIFT INFO ---
+            count = getattr(event.gift, 'repeat_count',
+                            getattr(event.gift, 'repeatCount', 1))
             data = {
-                'username': event.user.nick_name,
-                'profile_picture': event.user.profile_picture.url_list[0],
-                'gift': event.gift.name,
-                'gift_image': event.gift.image.url_list[0],
+                'unique_id': event.user.unique_id,
+                'display_name': event.user.nick_name,
+                'avatar': avatar_url,
+                'gift_name': event.gift.name,
+                'gift_image': gift_image_url,
                 'gift_diamonds': event.gift.diamond_count,
                 'gift_count': count,
-                'ts': time.time(),
+                'timestamp': time.time(),
             }
-            # log to console
-            print('Received gift:', data)
-            # enqueue for SSE
+
+            print("Received gift:", data)
             event_queue.put(data)
-            # store in recent events
             recent_events.insert(0, data)
             if len(recent_events) > MAX_EVENTS:
                 recent_events.pop()
+            # try:
+            #     count = event.gift.repeat_count
+            # except AttributeError:
+            #     # Fallback if attribute differs or single gift
+            #     count = getattr(event.gift, 'repeatCount', 1)  # noqa: F841
+            # data = {
+            #     'username': event.user.nick_name,
+            #     'gift': event.gift.name,
+            #     'gift_diamonds': event.gift.diamond_count,
+            #     'gift_count': count,
+            #     'ts': time.time(),
+            # }
+            # print("User object attributes:", dir(event.user))
+            # # Optionally, print its __dict__ to see values:
+            # print("User data:", event.user.__dict__)
+            # # log to console
+            # print('Received gift:', data)
+            # # enqueue for SSE
+            # event_queue.put(data)
+            # # store in recent events
+            # recent_events.insert(0, data)
+            # if len(recent_events) > MAX_EVENTS:
+            #     recent_events.pop()
 
         try:
             client.run()
