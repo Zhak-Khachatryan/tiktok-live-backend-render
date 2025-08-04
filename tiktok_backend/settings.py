@@ -57,6 +57,11 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
+CORS_ALLOWED_ORIGINS = [
+    "https://printer-test-vercel.vercel.app",
+]
+
+CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_ALL_ORIGINS = True
 
 ROOT_URLCONF = "tiktok_backend.urls"
