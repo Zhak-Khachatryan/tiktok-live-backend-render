@@ -1,8 +1,8 @@
-import json
 import queue
 import threading
 import time
 
+import gevent
 from django.http import JsonResponse, StreamingHttpResponse
 from TikTokLive import TikTokLiveClient
 from TikTokLive.events import GiftEvent
@@ -106,7 +106,7 @@ def live_stream(request, username):
                 # throttle if desired
             except queue.Empty:
                 yield ": heartbeat\n\n"
-                time.sleep(1)
+                gevent.sleep(1)
 
     return StreamingHttpResponse(event_stream(), content_type='text/event-stream')
 
