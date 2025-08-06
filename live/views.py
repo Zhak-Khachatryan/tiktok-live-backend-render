@@ -113,56 +113,57 @@ def live_stream(request, username):
 # Polling endpoint: recent donations + top donor
 # URL: /live/recent/?username=<user>
 def recent_gifts(request):
-    username = request.GET.get('username', 'zeeshankhan_dubai')
-    ensure_listener(username)
-    state = listeners[username]
-    recent = state['recent_events']
-    sent = state['sent_keys']
-    totals = state['totals']
+    # username = request.GET.get('username', 'zeeshankhan_dubai')
+    # ensure_listener(username)
+    # state = listeners[username]
+    # recent = state['recent_events']
+    # sent = state['sent_keys']
+    # totals = state['totals']
 
-    # Drain any pending events from the queue into recent_events
-    try:
-        while True:
-            ev = state['event_queue'].get_nowait()
-            # stacking logic (optional): if same user/gift, increment
-            for exist in recent:
-                if exist['unique_id']==ev['unique_id'] and exist['gift_name']==ev['gift_name']:
-                    exist['gift_count'] += ev['gift_count']
-                    exist['timestamp'] = ev['timestamp']
-                    break
-            else:
-                recent.insert(0, ev)
-                if len(recent) > MAX_EVENTS:
-                    recent.pop()
-    except queue.Empty:
-        pass
+    # # Drain any pending events from the queue into recent_events
+    # try:
+    #     while True:
+    #         ev = state['event_queue'].get_nowait()
+    #         # stacking logic (optional): if same user/gift, increment
+    #         for exist in recent:
+    #             if exist['unique_id']==ev['unique_id'] and exist['gift_name']==ev['gift_name']:
+    #                 exist['gift_count'] += ev['gift_count']
+    #                 exist['timestamp'] = ev['timestamp']
+    #                 break
+    #         else:
+    #             recent.insert(0, ev)
+    #             if len(recent) > MAX_EVENTS:
+    #                 recent.pop()
+    # except queue.Empty:
+    #     pass
 
-    new_list = []
-    if not sent:
-        # initial: return all currently stored events
-        for ev in recent[:MAX_EVENTS]:
-            new_list.append(ev)
-            sent.add(make_gift_key(ev))
-    else:
-        # subsequent: only new
-        for ev in reversed(recent):
-            key = make_gift_key(ev)
-            if key not in sent:
-                new_list.append(ev)
-                sent.add(key)
+    # new_list = []
+    # if not sent:
+    #     # initial: return all currently stored events
+    #     for ev in recent[:MAX_EVENTS]:
+    #         new_list.append(ev)
+    #         sent.add(make_gift_key(ev))
+    # else:
+    #     # subsequent: only new
+    #     for ev in reversed(recent):
+    #         key = make_gift_key(ev)
+    #         if key not in sent:
+    #             new_list.append(ev)
+    #             sent.add(key)
 
-    # compute top donor
-    top_user, top_info = None, None
-    for user, info in totals.items():
-        if top_info is None or info['diamonds'] > top_info['diamonds']:
-            top_user, top_info = user, info
-    top_donor = {}
-    if top_info:
-        top_donor = {
-            'unique_id': top_user,
-            'display_name': top_info['display_name'],
-            'total_diamonds': top_info['diamonds'],
-            'avatar': top_info['avatar'],
-        }
+    # # compute top donor
+    # top_user, top_info = None, None
+    # for user, info in totals.items():
+    #     if top_info is None or info['diamonds'] > top_info['diamonds']:
+    #         top_user, top_info = user, info
+    # top_donor = {}
+    # if top_info:
+    #     top_donor = {
+    #         'unique_id': top_user,
+    #         'display_name': top_info['display_name'],
+    #         'total_diamonds': top_info['diamonds'],
+    #         'avatar': top_info['avatar'],
+    #     }
 
-    return JsonResponse({'recent': new_list, 'top_donor': top_donor})
+    # return JsonResponse({'recent': new_list, 'top_donor': top_donor})
+    return JsonResponse({'hi': 'hi'}, status=201)
