@@ -1,11 +1,10 @@
 import json
 import logging
 import queue
-import threading
 
 import gevent
 from asgiref.sync import sync_to_async
-from django.db import connection, transaction
+from django.db import close_old_connections, connection, transaction
 from django.db.models import F
 from django.http import JsonResponse, StreamingHttpResponse
 from django.utils import timezone
@@ -32,6 +31,7 @@ def start_listener(username: str):
     """
     # get/ensure state exists (ensure_listener sets up state but keep safe)
     connection.close()
+    close_old_connections()
     state = listeners.get(username)
     client = TikTokLiveClient(unique_id=username)
 
@@ -49,6 +49,7 @@ def start_listener(username: str):
 
         # Do DB work on a thread via sync_to_async. We encapsulate sync logic in a function.
         def _process_db():
+            close_old_connections()
             # use a transaction for consistency
             with transaction.atomic():
                 # get or create donator using unique_id (unique key)
@@ -142,7 +143,7 @@ def ensure_listener(username: str):
         }
     state = listeners[username]
     if not state["thread"] or not state["thread"].is_alive():
-        t = threading.Thread(target=start_listener, args=(username,), daemon=True)
+        t = gevent.spawn(target=start_listener, args=(username,), daemon=True)
         state["thread"] = t
         t.start()
 
