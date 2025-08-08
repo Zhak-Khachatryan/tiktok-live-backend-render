@@ -1,169 +1,211 @@
+import json
+import logging
 import queue
 import threading
-import time
 
 import gevent
+from asgiref.sync import sync_to_async
+from django.db import transaction
+from django.db.models import F
 from django.http import JsonResponse, StreamingHttpResponse
+from django.utils import timezone
 from TikTokLive import TikTokLiveClient
 from TikTokLive.events import GiftEvent
 
-# Per-user listener state
+from .models import Donator, Gift
+
+logger = logging.getLogger(__name__)
+
+logging.basicConfig(level=logging.INFO)
+logging.getLogger("httpx").setLevel(logging.DEBUG)
+logging.getLogger("TikTokLive").setLevel(logging.DEBUG) 
+
 listeners = {}
 MAX_EVENTS = 20
 
-# Helper to key a gift event uniquely
-def make_gift_key(gift):
-    ts = int(gift.get('timestamp', 0))
-    return f"{gift['unique_id']}|{gift['gift_name']}|{ts}"
 
-# Background TikTok listener per user
 def start_listener(username: str):
-    state = listeners[username]
+    """
+    Background thread: runs TikTok client and processes incoming GiftEvent.
+    It writes DB rows (Donator/Gift) and enqueues a small payload into
+    listeners[username]['event_queue'] for any SSE client.
+    """
+    # get/ensure state exists (ensure_listener sets up state but keep safe)
+    state = listeners.get(username)
     client = TikTokLiveClient(unique_id=username)
 
     @client.on(GiftEvent)
     async def on_gift(event):
-        avatar = None
-        try:
-            avatar = event.user.avatar_thumb.m_urls[0]
-        except: pass
-        gift_img = None
-        try:
-            gift_img = event.gift.image.m_urls[0]
-        except:
-            try:
-                gift_img = event.gift.icon.m_urls[0]
-            except: pass
-        count = getattr(event.gift, 'repeat_count', getattr(event.gift, 'repeatCount', 1))
+        # extract raw event info
+        unique_id = event.user.unique_id
+        avatar = getattr(event.user.avatar_thumb, "m_urls", [None])[0]
+
+        gift_name = event.gift.name
+        gift_image = getattr(getattr(event.gift, "image", None) or getattr(event.gift, "icon", None), "m_urls", [None])[0]
+        count = getattr(event.gift, "repeat_count", getattr(event.gift, "repeatCount", 1))
         diamonds = event.gift.diamond_count * count
-        data = {
-            'unique_id': event.user.unique_id,
-            'display_name': event.user.nick_name,
-            'avatar': avatar,
-            'gift_name': event.gift.name,
-            'gift_image': gift_img,
-            'gift_diamonds': event.gift.diamond_count,
-            'gift_count': count,
-            'timestamp': time.time(),
+        print(diamonds, event.gift.diamond_count, count)
+
+        # Do DB work on a thread via sync_to_async. We encapsulate sync logic in a function.
+        def _process_db():
+            # use a transaction for consistency
+            with transaction.atomic():
+                # get or create donator using unique_id (unique key)
+                donator, created = Donator.objects.get_or_create(
+                    username=unique_id,
+                    defaults={"user_image": avatar, "diamonds": 0},
+                )
+                # atomic increment of diamonds and refresh avatar
+                Donator.objects.filter(pk=donator.pk).update(
+                    diamonds=F("diamonds") + diamonds,
+                    user_image=avatar,
+                )
+                # retrieve updated donator for later use
+                donator.refresh_from_db()
+
+                # find existing unread gift for this donator + name
+                # If exists, atomically increment fields; else create a new Gift
+                existing = Gift.objects.filter(user=donator, gift_name=gift_name, read=False).first()
+                if existing:
+                    Gift.objects.filter(pk=existing.pk).update(
+                        gift_count=F("gift_count") + count,
+                        diamonds=F("diamonds") + diamonds,
+                        # we cannot update timestamp with F(); set after refresh below
+                    )
+                    existing.refresh_from_db()
+                    existing.timestamp = timezone.now()
+                    existing.read = False
+                    existing.save(update_fields=["timestamp", "read"])
+                    gift_obj = existing
+                else:
+                    gift_obj = Gift.objects.create(
+                        user=donator,
+                        gift_name=gift_name,
+                        gift_image=gift_image,
+                        gift_count=count,
+                        diamonds=diamonds,
+                        read=False,
+                    )
+
+            return donator, gift_obj
+
+        try:
+            donator, gift_obj = await sync_to_async(_process_db)()
+        except Exception:
+            logger.exception("DB processing failed for gift event")
+            return
+
+        # prepare payload for SSE or other consumers
+        payload = {
+            "donator_username": donator.username,
+            "donator_avatar": donator.user_image,
+            "gift_id": gift_obj.id,
+            "gift_name": gift_obj.gift_name,
+            "gift_image": gift_obj.gift_image,
+            "gift_count": gift_obj.gift_count,
+            "gift_diamonds": gift_obj.diamonds,
+            "timestamp": gift_obj.timestamp.timestamp(),
         }
-        # update totals
-        totals = state['totals']
-        if data['unique_id'] not in totals:
-            totals[data['unique_id']] = {
-                'diamonds': 0,
-                'avatar': data['avatar'],
-                'display_name': data['display_name'],
-            }
-        totals[data['unique_id']]['diamonds'] += diamonds
 
-        # stacking logic
-        recent = state['recent_events']
-        for ev in recent:
-            if ev['unique_id'] == data['unique_id'] and ev['gift_name'] == data['gift_name']:
-                ev['gift_count'] += count
-                ev['timestamp'] = data['timestamp']
-                return
-        # new event
-        recent.insert(0, data)
-        if len(recent) > MAX_EVENTS:
-            recent.pop()
-        state['event_queue'].put(data)
+        # enqueue for any subscriber (safe because state is plain dict/populated by ensure_listener)
+        try:
+            if state is None:
+                # fallback: try to get live state if not captured earlier
+                s = listeners.get(username)
+            else:
+                s = state
+            if s:
+                # non-blocking put, but queue has no maxsize so this should not block
+                s["event_queue"].put(payload)
+        except Exception:
+            logger.exception("Failed to enqueue event payload")
 
-    # run listener (blocking)
-    client.run()
 
-# Ensure listener thread exists for user
+    # run listener (blocking) — keep that in a loop so if client.run() raises the thread will retry
+    while True:
+        try:
+            client.run()
+        except Exception as ex:
+            logger.exception(f"Listener for {username} crashed: {ex} — retrying in 5s")
+            gevent.sleep(5)
+
+
 def ensure_listener(username: str):
     if username not in listeners:
-        # initialize state
         listeners[username] = {
-            'event_queue': queue.Queue(),
-            'recent_events': [],
-            'sent_keys': set(),
-            'totals': {},
-            'thread': None,
+            "event_queue": queue.Queue(),
+            "recent_events": [],
+            "sent_keys": set(),
+            "totals": {},
+            "thread": None,
         }
     state = listeners[username]
-    if not state['thread'] or not state['thread'].is_alive():
+    if not state["thread"] or not state["thread"].is_alive():
         t = threading.Thread(target=start_listener, args=(username,), daemon=True)
-        state['thread'] = t
+        state["thread"] = t
         t.start()
 
-# SSE endpoint: live stream of new gifts
-# URL: /live/stream/?username=<user>
+
+# SSE endpoint (if you still want it) — now uses proper SSE framing and non-blocking queue checks
 def live_stream(request, username):
     ensure_listener(username)
     state = listeners[username]
-    connection_start = time.time()
 
     def event_stream():
-        while True:
-            try:
-                evt = state['event_queue'].get(timeout=15)
-                if evt['timestamp'] < connection_start:
-                    continue
-                yield "data got"
-                # throttle if desired
-            except queue.Empty:
-                yield ": heartbeat\n\n"
-                gevent.sleep(1)
+        try:
+            while True:
+                try:
+                    evt = state["event_queue"].get_nowait()
+                    payload = json.dumps(evt)
+                    # proper SSE framing: data: <payload>\n\n
+                    yield f"data: {payload}\n\n"
+                except queue.Empty:
+                    # heartbeat as SSE comment; keep a small sleep to avoid tight loop
+                    yield ": heartbeat\n\n"
+                    gevent.sleep(0.5)
+        except GeneratorExit:
+            # client disconnected — generator will be closed
+            return
+        except Exception:
+            logger.exception("Error in event_stream")
+            return
 
-    return StreamingHttpResponse(event_stream(), content_type='text/event-stream')
+    return StreamingHttpResponse(event_stream(), content_type="text/event-stream")
 
-# Polling endpoint: recent donations + top donor
-# URL: /live/recent/?username=<user>
+
+# Polling endpoint (improved)
 def recent_gifts(request):
-    # username = request.GET.get('username', 'zeeshankhan_dubai')
-    # ensure_listener(username)
-    # state = listeners[username]
-    # recent = state['recent_events']
-    # sent = state['sent_keys']
-    # totals = state['totals']
 
-    # # Drain any pending events from the queue into recent_events
-    # try:
-    #     while True:
-    #         ev = state['event_queue'].get_nowait()
-    #         # stacking logic (optional): if same user/gift, increment
-    #         for exist in recent:
-    #             if exist['unique_id']==ev['unique_id'] and exist['gift_name']==ev['gift_name']:
-    #                 exist['gift_count'] += ev['gift_count']
-    #                 exist['timestamp'] = ev['timestamp']
-    #                 break
-    #         else:
-    #             recent.insert(0, ev)
-    #             if len(recent) > MAX_EVENTS:
-    #                 recent.pop()
-    # except queue.Empty:
-    #     pass
+    # limit and optimize with select_related to avoid per-row user queries
+    gifts_qs = Gift.objects.filter(read=False).order_by("timestamp").select_related("user")[:MAX_EVENTS]
+    gifts_list = list(gifts_qs)  # evaluated
+    gift_ids = [g.id for g in gifts_list]
 
-    # new_list = []
-    # if not sent:
-    #     # initial: return all currently stored events
-    #     for ev in recent[:MAX_EVENTS]:
-    #         new_list.append(ev)
-    #         sent.add(make_gift_key(ev))
-    # else:
-    #     # subsequent: only new
-    #     for ev in reversed(recent):
-    #         key = make_gift_key(ev)
-    #         if key not in sent:
-    #             new_list.append(ev)
-    #             sent.add(key)
+    recent = [
+        {
+            "username": g.user.username,
+            "avatar": g.user.user_image,
+            "gift_name": g.gift_name,
+            "gift_image": g.gift_image,
+            "gift_count": g.gift_count,
+            "diamonds": g.diamonds,
+            "timestamp": g.timestamp.timestamp(),
+        }
+        for g in gifts_list
+    ]
 
-    # # compute top donor
-    # top_user, top_info = None, None
-    # for user, info in totals.items():
-    #     if top_info is None or info['diamonds'] > top_info['diamonds']:
-    #         top_user, top_info = user, info
-    # top_donor = {}
-    # if top_info:
-    #     top_donor = {
-    #         'unique_id': top_user,
-    #         'display_name': top_info['display_name'],
-    #         'total_diamonds': top_info['diamonds'],
-    #         'avatar': top_info['avatar'],
-    #     }
+    # mark read in one bulk update
+    if gift_ids:
+        Gift.objects.filter(id__in=gift_ids).update(read=True)
 
-    # return JsonResponse({'recent': new_list, 'top_donor': top_donor})
-    return JsonResponse({'hi': 'hi'}, status=201)
+    # top Donator (descending diamonds)
+    top_donor = Donator.objects.order_by("-diamonds").first()
+    top = {}
+    if top_donor:
+        top = {
+            "username": top_donor.username,
+            "avatar": top_donor.user_image,
+            "total_diamonds": top_donor.diamonds,
+        }
+
+    return JsonResponse({"recent": recent, "top_donor": top})
