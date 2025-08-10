@@ -4,7 +4,7 @@ import queue
 
 import gevent
 from asgiref.sync import sync_to_async
-from django.db import close_old_connections, connection, transaction
+from django.db import close_old_connections, transaction
 from django.db.models import F
 from django.http import JsonResponse, StreamingHttpResponse
 from django.utils import timezone
@@ -30,7 +30,6 @@ def start_listener(username: str):
     listeners[username]['event_queue'] for any SSE client.
     """
     # get/ensure state exists (ensure_listener sets up state but keep safe)
-    connection.close()
     close_old_connections()
     state = listeners.get(username)
     client = TikTokLiveClient(unique_id=username)
