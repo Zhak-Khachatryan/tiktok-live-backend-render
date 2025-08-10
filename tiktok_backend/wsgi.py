@@ -13,7 +13,7 @@ application = get_wsgi_application()
 # concurrency issues. See long-term fixes below.
 try:
     from django.db import connection
-    connection.allow_thread_sharing = True
+    connection.set_allow_thread_sharing(True)
 except Exception:
     # If anything goes wrong, don't block app startup.
     import logging
