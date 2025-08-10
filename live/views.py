@@ -177,6 +177,7 @@ def live_stream(request, username):
 
 # Polling endpoint (improved)
 def recent_gifts(request):
+    close_old_connections()
 
     # limit and optimize with select_related to avoid per-row user queries
     gifts_qs = Gift.objects.filter(read=False).order_by("timestamp").select_related("user")[:MAX_EVENTS]
