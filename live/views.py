@@ -89,24 +89,34 @@ def start_listener(username: str):
                         read=False,
                     )
 
-            return donator, gift_obj
+            return {
+                "donator_id": donator.pk,
+                "donator_username": donator.username,
+                "donator_avatar": donator.user_image,
+                "gift_id": gift_obj.pk,
+                "gift_name": gift_obj.gift_name,
+                "gift_image": gift_obj.gift_image,
+                "gift_count": gift_obj.gift_count,
+                "gift_diamonds": gift_obj.diamonds,
+                "timestamp": gift_obj.timestamp.timestamp(),
+            }
 
         try:
-            donator, gift_obj = await sync_to_async(_process_db)()
+            result = await sync_to_async(_process_db)()
         except Exception:
             logger.exception("DB processing failed for gift event")
             return
 
         # prepare payload for SSE or other consumers
         payload = {
-            "donator_username": donator.username,
-            "donator_avatar": donator.user_image,
-            "gift_id": gift_obj.id,
-            "gift_name": gift_obj.gift_name,
-            "gift_image": gift_obj.gift_image,
-            "gift_count": gift_obj.gift_count,
-            "gift_diamonds": gift_obj.diamonds,
-            "timestamp": gift_obj.timestamp.timestamp(),
+            "donator_username": result["donator_username"],
+            "donator_avatar": result["donator_avatar"],
+            "gift_id": result["gift_id"],
+            "gift_name": result["gift_name"],
+            "gift_image": result["gift_image"],
+            "gift_count": result["gift_count"],
+            "gift_diamonds": result["gift_diamonds"],
+            "timestamp": result["timestamp"],
         }
 
         # enqueue for any subscriber (safe because state is plain dict/populated by ensure_listener)
@@ -142,10 +152,9 @@ def ensure_listener(username: str):
             "thread": None,
         }
     state = listeners[username]
-    if not state["thread"] or not state["thread"].is_alive():
-        t = gevent.spawn(target=start_listener, args=(username,), daemon=True)
-        state["thread"] = t
-        t.start()
+    if not state["thread"] or getattr(state["thread"], "dead", False):
+        g = gevent.spawn(start_listener, username)
+        state["thread"] = g
 
 
 # SSE endpoint (if you still want it) — now uses proper SSE framing and non-blocking queue checks
